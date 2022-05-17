@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"net"
 	"net/http"
+	"sync"
 
 	"github.com/filecoin-project/index-provider/server/utils"
 
@@ -24,9 +25,10 @@ type Server struct {
 
 	s *http.Server
 	l net.Listener
+	r *mux.Router
 
-	mhs map[string][]multihash.Multihash
-	r   *mux.Router
+	mhs   map[string][]multihash.Multihash
+	mhMux sync.Mutex
 }
 
 func NewServer(o ...Option) (*Server, error) {
@@ -109,7 +111,18 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) AddMultiHashes(contextID []byte, mhs []multihash.Multihash) {
+	s.mhMux.Lock()
+	defer s.mhMux.Unlock()
 	s.mhs[string(contextID)] = mhs
+}
+
+func (s *Server) DelMultiHashes(contextID []byte) (find bool) {
+	s.mhMux.Lock()
+	defer s.mhMux.Unlock()
+	if _, find = s.mhs[string(contextID)]; find {
+		delete(s.mhs, string(contextID))
+	}
+	return find
 }
 
 func (s *Server) Start() error {

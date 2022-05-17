@@ -8,6 +8,7 @@ import (
 	"github.com/filecoin-project/index-provider/testutil"
 	"github.com/stretchr/testify/require"
 	"io"
+	"strings"
 	"testing"
 	"time"
 
@@ -77,6 +78,13 @@ func TestMhIter(t *testing.T) {
 		require.Equal(t, errors.Is(httpMhIter.nextPage(), io.EOF), true)
 	})
 
+	t.Run("TestRemove", func(t *testing.T) {
+		require.Equal(t, svr.DelMultiHashes([]byte("ContextIDNotExists")), false)
+		require.Equal(t, svr.DelMultiHashes([]byte(ContextID)), true)
+		_, err := NewHttpMhIterator(opts, []byte(ContextID), uint64(mhsCount)).Next()
+		require.Equal(t, strings.Contains(err.Error(), "not found"), true)
+
+	})
 	svrStartErrChan <- nil
 
 	require.NoError(t, svr.Shutdown(context.TODO()))
