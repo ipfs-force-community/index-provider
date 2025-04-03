@@ -203,3 +203,5 @@ require (
 	gopkg.in/yaml.v3 v3.0.1 // indirect
 	lukechampine.com/blake3 v1.3.0 // indirect
 )
+
+replace github.com/ipni/go-libipni => github.com/ipfs-force-community/go-libipni v0.0.0-20250403062747-d163f25ff0ac
