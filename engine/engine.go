@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"net/http"
 	"net/url"
+	"strings"
 	"sync"
 
 	"github.com/hashicorp/go-multierror"
@@ -244,16 +245,23 @@ func (e *Engine) createSenders(announceURLs []*url.URL, pubsubOK bool, extraGoss
 }
 
 // announce uses the engines senders to send advertisement announcement messages.
-func (e *Engine) announce(ctx context.Context, c cid.Cid) {
+func (e *Engine) announce(ctx context.Context, c cid.Cid) error {
 	// If announcements disabled.
 	if e.pubKind == NoPublisher {
-		return
+		return nil
 	}
 
-	err := announce.Send(ctx, c, e.pubHttpAnnounceAddrs, e.senders...)
+	successCount, err := announce.Send2(ctx, c, e.pubHttpAnnounceAddrs, e.senders...)
 	if err != nil {
-		log.Errorw("Failed to announce advertisement", "err", err)
+		if successCount > 0 {
+			if strings.Contains(err.Error(), http.StatusText(http.StatusTooManyRequests)) {
+				return err
+			}
+			return nil
+		}
+		return err
 	}
+	return nil
 }
 
 // PublishLocal stores the advertisement in the local link system and marks it
@@ -307,7 +315,7 @@ func (e *Engine) Publish(ctx context.Context, adv schema.Advertisement) (cid.Cid
 	if e.publisher != nil {
 		log.Infow(e.announceMsg, "adCid", c)
 		e.publisher.SetRoot(c)
-		e.announce(ctx, c)
+		return c, e.announce(ctx, c)
 	}
 
 	return c, nil
@@ -343,9 +351,8 @@ func (e *Engine) PublishLatest(ctx context.Context) (cid.Cid, error) {
 	log.Infow("Publishing latest advertisement", "cid", adCid)
 
 	e.publisher.SetRoot(adCid)
-	e.announce(ctx, adCid)
 
-	return adCid, nil
+	return adCid, e.announce(ctx, adCid)
 }
 
 // PublishLatestHTTP publishes the latest existing advertisement and sends
@@ -597,6 +604,15 @@ func (e *Engine) publishAdvForIndex(ctx context.Context, p peer.ID, addrs []mult
 		if err = e.putKeyMetadataMap(ctx, p, contextID, &md); err != nil {
 			return cid.Undef, fmt.Errorf("failed to write provider + context id to metadata mapping: %s", err)
 		}
+
+		defer func() {
+			if err == nil {
+				return
+			}
+			if err := e.removeLocalData(ctx, p, contextID, c); err != nil {
+				log.Debugf("failed to remove local data: %s", err)
+			}
+		}()
 	} else {
 		log.Info("Creating removal advertisement")
 
@@ -606,17 +622,20 @@ func (e *Engine) publishAdvForIndex(ctx context.Context, p peer.ID, addrs []mult
 
 		// If removing by context ID, it means the list of CIDs is not needed
 		// anymore, so we can remove the entry from the datastore.
-		err = e.deleteKeyCidMap(ctx, p, contextID)
-		if err != nil {
-			return cid.Undef, fmt.Errorf("failed to delete provider + context id to entries cid mapping: %s", err)
-		}
-		err = e.deleteCidKeyMap(ctx, c)
-		if err != nil {
-			return cid.Undef, fmt.Errorf("failed to delete entries cid to provider + context id mapping: %s", err)
-		}
-		err = e.deleteKeyMetadataMap(ctx, p, contextID)
-		if err != nil {
-			return cid.Undef, fmt.Errorf("failed to delete provider + context id to metadata mapping: %s", err)
+		// err = e.deleteKeyCidMap(ctx, p, contextID)
+		// if err != nil {
+		// 	return cid.Undef, fmt.Errorf("failed to delete provider + context id to entries cid mapping: %s", err)
+		// }
+		// err = e.deleteCidKeyMap(ctx, c)
+		// if err != nil {
+		// 	return cid.Undef, fmt.Errorf("failed to delete entries cid to provider + context id mapping: %s", err)
+		// }
+		// err = e.deleteKeyMetadataMap(ctx, p, contextID)
+		// if err != nil {
+		// 	return cid.Undef, fmt.Errorf("failed to delete provider + context id to metadata mapping: %s", err)
+		// }
+		if err := e.removeLocalData(ctx, p, contextID, c); err != nil {
+			return cid.Undef, fmt.Errorf("advertisement CID: %v, error: %v", c, err)
 		}
 
 		// Create an advertisement to delete content by contextID by specifying
@@ -665,7 +684,29 @@ func (e *Engine) publishAdvForIndex(ctx context.Context, p peer.ID, addrs []mult
 	if err = adv.Sign(e.key); err != nil {
 		return cid.Undef, err
 	}
-	return e.Publish(ctx, adv)
+
+	var adCid cid.Cid
+	adCid, err = e.Publish(ctx, adv)
+	return adCid, err
+}
+
+func (e *Engine) removeLocalData(ctx context.Context, p peer.ID, contextID []byte, c cid.Cid) error {
+	// If removing by context ID, it means the list of CIDs is not needed
+	// anymore, so we can remove the entry from the datastore.
+	err := e.deleteKeyCidMap(ctx, p, contextID)
+	if err != nil {
+		return fmt.Errorf("failed to delete provider + context id to entries cid mapping: %s", err)
+	}
+	err = e.deleteCidKeyMap(ctx, c)
+	if err != nil {
+		return fmt.Errorf("failed to delete entries cid to provider + context id mapping: %s", err)
+	}
+	err = e.deleteKeyMetadataMap(ctx, p, contextID)
+	if err != nil {
+		return fmt.Errorf("failed to delete provider + context id to metadata mapping: %s", err)
+	}
+
+	return nil
 }
 
 func (e *Engine) keyToCidKey(provider peer.ID, contextID []byte) datastore.Key {
